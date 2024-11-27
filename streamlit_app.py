@@ -1,10 +1,11 @@
-import streamlit as st
-import pandas as pd
-from openai import OpenAI
+import json
+
 import duckdb
+import pandas as pd
 import plotly.express as px
 import sqlalchemy
-import json
+import streamlit as st
+from openai import OpenAI
 
 
 class DataChatAgent:
@@ -38,7 +39,7 @@ class DataChatAgent:
                 "type": "function",
                 "function": {
                     "name": "generate_and_execute_sql",
-                    "description": "Generate and execute a SQL query based on a user's question. This function handles both query generation and execution.",
+                    "description": "Generate and execute a SQL query based on a user's question.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -48,10 +49,26 @@ class DataChatAgent:
                             }
                         },
                         "required": ["user_input"],
-                        "additionalProperties": False,
                     },
                 },
-            }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "generate_visualization",
+                    "description": "Generate a visualization based on the user's request",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "user_input": {
+                                "type": "string",
+                                "description": "The user's request for visualization",
+                            }
+                        },
+                        "required": ["user_input"],
+                    },
+                },
+            },
         ]
 
     def connect_to_database(self, connection_type, **kwargs):
@@ -184,7 +201,7 @@ class DataChatAgent:
             User Question: {user_input}
 
             Write a SQL query to answer this question. The query should work with {'PostgreSQL' if st.session_state.database_type == 'postgres' else 'DuckDB'} syntax.
-
+            Return the ouput strictly as an SQL query without any backticks, quotes, or other formatting.
             SQL Query:"""
 
             print(f"🔄 Sending prompt to OpenAI:\n{prompt}")
@@ -199,7 +216,7 @@ class DataChatAgent:
             ]
 
             response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo", messages=messages, temperature=0
+                model="gpt-4o", messages=messages, temperature=0
             )
 
             # Validate OpenAI response
@@ -207,6 +224,7 @@ class DataChatAgent:
                 return {"type": "error", "content": "Failed to generate SQL query"}
 
             query = response.choices[0].message.content.strip()
+
             print(f"✨ Generated SQL query:\n{query}")
 
             # Execute the query
@@ -243,33 +261,139 @@ class DataChatAgent:
             print(f"❌ Error in generate_and_execute_sql: {str(e)}")
             return {"type": "error", "content": str(e)}
 
-    def generate_visualization(self, data, viz_type="auto", column=None):
-        """Generates visualization based on data and type"""
-        print(f"📊 Generating {viz_type} visualization for {column}")
+    def get_visualization_details(self, user_input):
+        """Get visualization type and required columns from LLM"""
+        schema_prompt = self._create_schema_prompt()
+
+        prompt = f"""Given the following database schema and user request, determine the appropriate visualization type and required columns.
+
+        {schema_prompt}
+
+        User Request: {user_input}
+
+        Return only a JSON object with two fields:
+        1. 'viz_type': One of ['histogram', 'bar', 'scatter', 'line', 'box', 'pie']
+        2. 'columns': List of required column names, fully qualified with table names
+
+        Example response:
+        {{"viz_type": "scatter", "columns": ["table1.x_column", "table1.y_column"]}}"""
+
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a data visualization expert. Respond only with the requested JSON format.",
+            },
+            {"role": "user", "content": prompt},
+        ]
+
+        response = self.client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+
+        try:
+            return json.loads(response.choices[0].message.content)
+        except Exception as e:
+            print(f"❌ Error parsing visualization response: {str(e)}")
+            return None
+
+    def create_visualization(self, viz_type, data):
+        """Create the appropriate plotly visualization"""
         try:
             if viz_type == "histogram":
-                return px.histogram(data, x=column, title=f"Distribution of {column}")
-            elif viz_type == "auto":
-                # Determine appropriate visualization based on data
-                if len(data.columns) == 1:
-                    return px.histogram(
-                        data,
-                        x=data.columns[0],
-                        title=f"Distribution of {data.columns[0]}",
-                    )
-                elif len(data.columns) == 2:
-                    numeric_cols = data.select_dtypes(
-                        include=["int64", "float64"]
-                    ).columns
-                    if len(numeric_cols) == 2:
-                        return px.scatter(data, x=data.columns[0], y=data.columns[1])
-                    else:
-                        return px.bar(data, x=data.columns[0], y=data.columns[1])
+                return px.histogram(
+                    data, x=data.columns[0], title=f"Distribution of {data.columns[0]}"
+                )
+
+            elif viz_type == "bar":
+                return px.bar(
+                    data,
+                    x=data.columns[0],
+                    y=data.columns[1],
+                    title=f"{data.columns[1]} by {data.columns[0]}",
+                )
+
+            elif viz_type == "scatter":
+                return px.scatter(
+                    data,
+                    x=data.columns[0],
+                    y=data.columns[1],
+                    title=f"{data.columns[1]} vs {data.columns[0]}",
+                )
+
+            elif viz_type == "line":
+                return px.line(
+                    data,
+                    x=data.columns[0],
+                    y=data.columns[1],
+                    title=f"{data.columns[1]} over {data.columns[0]}",
+                )
+
+            elif viz_type == "box":
+                return px.box(
+                    data,
+                    x=data.columns[0],
+                    y=data.columns[1],
+                    title=f"Distribution of {data.columns[1]} by {data.columns[0]}",
+                )
+
+            elif viz_type == "pie":
+                return px.pie(
+                    data,
+                    values=data.columns[1],
+                    names=data.columns[0],
+                    title=f"{data.columns[1]} Distribution",
+                )
 
             return None
         except Exception as e:
-            print(f"❌ Error generating visualization: {str(e)}")
+            print(f"❌ Error creating visualization: {str(e)}")
             return None
+
+    def generate_visualization(self, user_input):
+        """Main visualization function called by the LLM"""
+        try:
+            print("Generating visualization called.")
+
+            # Get visualization details from LLM
+            viz_details = self.get_visualization_details(user_input)
+            if not viz_details:
+                return {
+                    "type": "error",
+                    "content": "Failed to determine visualization type",
+                }
+
+            print("Viz details:", viz_details)
+
+            # Generate SQL to get required data
+            columns_str = ", ".join(viz_details["columns"])
+            query = (
+                f"SELECT {columns_str} FROM {viz_details['columns'][0].split('.')[0]}"
+            )
+
+            print("Query:", query)
+
+            # Execute query
+            result = st.session_state.database_connection.execute(query).fetch_df()
+
+            print("Result:", result)
+
+            # Create visualization
+            plot = self.create_visualization(viz_details["viz_type"], result)
+            if plot is None:
+                return {"type": "error", "content": "Failed to create visualization"}
+
+            return {
+                "type": "plot",
+                "content": f"Here's a {viz_details['viz_type']} visualization:",
+                "data": plot,
+            }
+
+        except Exception as e:
+            print(f"❌ Error in generate_visualization: {str(e)}")
+            return {"type": "error", "content": str(e)}
 
     def _update_schema_string(self):
         """
@@ -341,8 +465,7 @@ class DataChatAgent:
                 2. Using SQL queries to answer their questions
                 3. Providing information about the data structure when asked
                 
-                When a user's question requires data analysis, calculations, or filtering, 
-                use the generate_and_execute_sql function to help answer their question.""",
+                When appropriate use the custom functions provided to you. You do not have to call them every time, only when needed.""",
                 },
                 {
                     "role": "user",
@@ -355,17 +478,20 @@ class DataChatAgent:
                 messages=messages,
                 tools=self.tools,
                 tool_choice="auto",
-                temperature=0.1,
+                temperature=0,
             )
 
             message = response.choices[0].message
 
             if hasattr(message, "tool_calls") and message.tool_calls:
                 tool_call = message.tool_calls[0]
+                function_name = tool_call.function.name
                 function_args = json.loads(tool_call.function.arguments)
 
-                # Only one function to handle now
-                return self.generate_and_execute_sql(function_args["user_input"])
+                if function_name == "generate_and_execute_sql":
+                    return self.generate_and_execute_sql(function_args["user_input"])
+                elif function_name == "generate_visualization":
+                    return self.generate_visualization(function_args["user_input"])
             else:
                 return {
                     "type": "text",
@@ -457,6 +583,7 @@ def main():
             elif message["display_type"] == "plot":
                 st.markdown(message["content"])
                 if message.get("data") is not None:
+                    print("Plotting data.")
                     st.plotly_chart(message["data"])
 
     # Chat input
@@ -473,11 +600,7 @@ def main():
         # Display assistant response
         with st.chat_message("assistant"):
             if response["type"] == "sql":
-                content = f"""I'll help you with that query!
-                ```sql
-                {response['query']}
-                ```
-                Here are the results:"""
+                content = f"""I'll help you with that query! \n ```sql\n{response['query']}\n```\nHere are the results:"""
                 st.markdown(content)
                 st.dataframe(response["results"])
 
@@ -502,6 +625,12 @@ def main():
                     }
                 )
 
+            elif response["type"] == "plot":
+                st.markdown(response["content"])
+                if response.get("data") is not None:
+                    print("Plotting data inside with.")
+                    st.plotly_chart(response["data"])
+
             else:  # error
                 st.error(response["content"])
                 st.session_state.messages.append(
@@ -512,6 +641,8 @@ def main():
                         "data": None,
                     }
                 )
+
+            print("Messages: ", st.session_state.messages)
 
 
 if __name__ == "__main__":
