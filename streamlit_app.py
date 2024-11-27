@@ -1,12 +1,10 @@
 import streamlit as st
 import pandas as pd
+from openai import OpenAI
 import duckdb
 import plotly.express as px
-from typing import Dict, Tuple, Optional, Union
 import sqlalchemy
-from langchain.chat_models import ChatOpenAI
-from langchain.chains import create_sql_query_chain
-from langchain.utilities import SQLDatabase
+import json
 
 
 class DataChatApp:
@@ -19,12 +17,42 @@ class DataChatApp:
         if 'database_type' not in st.session_state:
             st.session_state.database_type = None
         
-        self.llm = ChatOpenAI(temperature=0)
+        self.client = OpenAI(api_key=st.secrets["openai_key"])
         print("🚀 Initialized DataChatApp")
         
-        # Initialize messages in session state if not present
+        # Initialize messages with enhanced structure if not exists
         if 'messages' not in st.session_state:
             st.session_state.messages = []
+        
+        # Message structure will be:
+        # {
+        #     "role": "user" | "assistant",
+        #     "content": str,
+        #     "display_type": "text" | "sql" | "dataframe" | "error" | "plot",
+        #     "data": Optional[Any]  # Contains dataframe, plot object, etc.
+        # }
+        
+        # Updated tools schema with single function
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "generate_and_execute_sql",
+                    "description": "Generate and execute a SQL query based on a user's question. This function handles both query generation and execution.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "user_input": {
+                                "type": "string",
+                                "description": "The user's question or request about the data."
+                            }
+                        },
+                        "required": ["user_input"],
+                        "additionalProperties": False
+                    }
+                }
+            }
+        ]
             
     def connect_to_database(self, connection_type, **kwargs):
         """Establishes database connection"""
@@ -109,125 +137,131 @@ class DataChatApp:
                 columns.append(f'    {quote}{col}{quote} {sql_type}')
             
             create_table = f"""
-    CREATE TABLE {quote}{table_name}{quote} (
-{',\n'.join(columns)}
-    );
-    
-    -- Sample data for {table_name}:
-    {sample_data}"""
+            CREATE TABLE {quote}{table_name}{quote} ({',\n'.join(columns)});
+            
+            -- Sample data for {table_name}:
+            {sample_data}"""
             schema_statements.append(create_table)
         
         final_schema = "\n".join(schema_statements)
         print(f"📋 Generated schema:\n{final_schema}")
         return final_schema
 
-    def generate_sql(self, user_input):
-        """Generates SQL query from natural language input"""
+    def generate_and_execute_sql(self, user_input):
+        """Generates SQL query from natural language input and executes it"""
         try:
             print(f"🤔 Processing user question: {user_input}")
             
+            # Check if database is ready
             if not st.session_state.tables_info:
-                print("❌ No tables available in database")
-                return "No tables available. Please upload data first."
+                return {
+                    'type': 'error',
+                    'content': "No tables available. Please upload data first."
+                }
 
+            # Generate SQL query
             schema_prompt = self._create_schema_prompt()
-            
-            # Determine quote style based on database type
             quote_style = 'double quotes (")' if st.session_state.database_type == 'duckdb' else 'backticks (`)'
             
             prompt = f"""Given the following SQL tables, your job is to write queries given a user's request.
 
-{schema_prompt}
+            {schema_prompt}
 
-Important notes:
-1. Use {quote_style} around table and column names to handle special characters
-2. Always fully qualify column names with table names
-3. The query must use only the tables and columns shown above
-4. Use proper table aliases if needed
+            Important notes:
+            1. Use {quote_style} around table and column names to handle special characters
+            2. Always fully qualify column names with table names
+            3. The query must use only the tables and columns shown above
+            4. Use proper table aliases if needed
 
-User Question: {user_input}
+            User Question: {user_input}
 
-Write a SQL query to answer this question. Use only the tables and columns provided above.
-The query should work with {'PostgreSQL' if st.session_state.database_type == 'postgres' else 'DuckDB'} syntax.
+            Write a SQL query to answer this question. The query should work with {'PostgreSQL' if st.session_state.database_type == 'postgres' else 'DuckDB'} syntax.
 
-SQL Query:"""
+            SQL Query:"""
 
             print(f"🔄 Sending prompt to OpenAI:\n{prompt}")
             
+            # Get SQL query from OpenAI
             messages = [
                 {
                     "role": "system", 
-                    "content": f"""You are a SQL expert. Generate only the SQL query without any explanations.
-                    Always use {quote_style} around table and column names.
-                    Always fully qualify column names with table names or aliases."""
+                    "content": "You are a SQL expert. Generate only the SQL query without any explanations."
                 },
                 {"role": "user", "content": prompt}
             ]
             
-            response = self.llm.invoke(messages)
-            query = response.content.strip()
+            response = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=messages,
+                temperature=0
+            )
+            
+            # Validate OpenAI response
+            if not response.choices or not response.choices[0].message.content:
+                return {
+                    'type': 'error',
+                    'content': "Failed to generate SQL query"
+                }
+            
+            query = response.choices[0].message.content.strip()
             print(f"✨ Generated SQL query:\n{query}")
             
-            if not query.lower().startswith('select'):
-                print("❌ Invalid query generated - doesn't start with SELECT")
-                return "Error: Generated query doesn't appear to be valid SQL"
-            
-            return query
-            
+            # Execute the query
+            try:
+                print(f"▶️ Executing query:\n{query}")
+                result = st.session_state.database_connection.execute(query).fetch_df()
+                print(f"✅ Query executed successfully. Result shape: {result.shape}")
+                
+                return {
+                    'type': 'sql',
+                    'query': query,
+                    'results': result
+                }
+                
+            except Exception as exec_error:
+                error_msg = str(exec_error)
+                print(f"❌ Query execution failed: {error_msg}")
+                
+                # Enhanced error messages
+                if "column not found" in error_msg.lower() or "not found in from clause" in error_msg.lower():
+                    available_columns = []
+                    for table_name, info in st.session_state.tables_info.items():
+                        available_columns.extend([f"`{table_name}`.`{col}`" for col in info['columns']])
+                    error_msg = f"Column not found. Available columns are: {', '.join(available_columns)}"
+                
+                return {
+                    'type': 'error',
+                    'query': query,
+                    'content': f"Error executing query: {error_msg}"
+                }
+                
         except Exception as e:
-            print(f"❌ Error in SQL generation: {str(e)}")
-            return f"Error generating SQL: {str(e)}"
+            print(f"❌ Error in generate_and_execute_sql: {str(e)}")
+            return {
+                'type': 'error',
+                'content': str(e)
+            }
 
-    def execute_query(self, query):
-        """Executes SQL query and returns results"""
+    def generate_visualization(self, data, viz_type='auto', column=None):
+        """Generates visualization based on data and type"""
+        print(f"📊 Generating {viz_type} visualization for {column}")
         try:
-            print(f"▶️ Attempting to execute query:\n{query}")
+            if viz_type == 'histogram':
+                return px.histogram(data, x=column, title=f'Distribution of {column}')
+            elif viz_type == 'auto':
+                # Determine appropriate visualization based on data
+                if len(data.columns) == 1:
+                    return px.histogram(data, x=data.columns[0], title=f'Distribution of {data.columns[0]}')
+                elif len(data.columns) == 2:
+                    numeric_cols = data.select_dtypes(include=['int64', 'float64']).columns
+                    if len(numeric_cols) == 2:
+                        return px.scatter(data, x=data.columns[0], y=data.columns[1])
+                    else:
+                        return px.bar(data, x=data.columns[0], y=data.columns[1])
             
-            # Print current tables and their columns for debugging
-            print("📊 Available tables and columns:")
-            for table_name, info in st.session_state.tables_info.items():
-                print(f"Table: {table_name}")
-                print(f"Columns: {info['columns']}")
-            
-            result = st.session_state.database_connection.execute(query).fetch_df()
-            print(f"✅ Query executed successfully. Result shape: {result.shape}")
-            return result
-        except Exception as e:
-            print(f"❌ Query execution failed: {str(e)}")
-            error_msg = str(e)
-            
-            # Enhanced error messages
-            if "column not found" in error_msg.lower() or "not found in from clause" in error_msg.lower():
-                print("🔍 Column name issue detected. Checking available columns...")
-                available_columns = []
-                for table_name, info in st.session_state.tables_info.items():
-                    available_columns.extend([f"`{table_name}`.`{col}`" for col in info['columns']])
-                return f"Error: Column not found. Available columns are: {', '.join(available_columns)}"
-            
-            return f"Error executing query: {error_msg}"
-
-    def generate_visualization(self, data):
-        """Generates appropriate visualization based on data"""
-        try:
-            print("📊 Attempting to generate visualization")
-            if data.empty:
-                print("❌ No data available for visualization")
-                return None
-            
-            # Determine appropriate visualization based on data
-            if len(data.columns) == 2:
-                numeric_cols = data.select_dtypes(include=['int64', 'float64']).columns
-                if len(numeric_cols) == 1:
-                    print("📊 Generating bar chart")
-                    return px.bar(data, x=data.columns[0], y=data.columns[1])
-                elif len(numeric_cols) == 2:
-                    print("📊 Generating scatter plot")
-                    return px.scatter(data, x=data.columns[0], y=data.columns[1])
-            
-            print("ℹ️ No suitable visualization type found")
             return None
         except Exception as e:
-            print(f"❌ Visualization generation failed: {str(e)}")
+            print(f"❌ Error generating visualization: {str(e)}")
             return None
 
     def _update_schema_string(self):
@@ -247,9 +281,7 @@ SQL Query:"""
                     columns.append(f"{col} {sql_type}")
                 
                 # Create table schema string
-                table_schema = f"""CREATE TABLE {table_name} (
-    {',\n    '.join(columns)}
-);"""
+                table_schema = f"""CREATE TABLE {table_name} ({',\n    '.join(columns)});"""
                 schema.append(table_schema)
             
             # Store the complete schema string in session state
@@ -276,71 +308,64 @@ SQL Query:"""
         
         return "\n".join(info_text)
 
-    def generate_natural_response(self, user_input):
-        """Generate natural language response for non-SQL questions"""
+    def process_user_input(self, user_input):
+        """Process user input using OpenAI function calling"""
         try:
-            print(f"🗣️ Generating natural language response for: {user_input}")
+            print(f"🤔 Processing user input: {user_input}")
             
-            # Create context about current database state
+            if not st.session_state.tables_info:
+                return {
+                    'type': 'text',
+                    'content': "No tables available. Please upload data first."
+                }
+
             context = self.get_tables_info_text()
-            
-            prompt = f"""Current database state:
-{context}
-
-User question: {user_input}
-
-Please provide a natural language response about the database state. Be specific about the actual tables and data present."""
-
             messages = [
                 {
                     "role": "system",
-                    "content": "You are a helpful database assistant. Provide clear, concise responses about the database state and contents."
+                    "content": """You are a data analysis assistant. Your job is to help users analyze their data by:
+                1. Understanding their questions about the data
+                2. Using SQL queries to answer their questions
+                3. Providing information about the data structure when asked
+                
+                When a user's question requires data analysis, calculations, or filtering, 
+                use the generate_and_execute_sql function to help answer their question."""
                 },
-                {"role": "user", "content": prompt}
+                {
+                    "role": "user",
+                    "content": f"Current database state:\n{context}\n\nUser question: {user_input}"
+                }
             ]
-            
-            print(f"🔄 Sending prompt to OpenAI:\n{prompt}")
-            response = self.llm.invoke(messages)
-            print(f"✨ Generated response:\n{response.content}")
-            
-            return response.content
-            
-        except Exception as e:
-            print(f"❌ Error generating response: {str(e)}")
-            return f"Error generating response: {str(e)}"
 
-    def process_user_input(self, user_input):
-        """Process user input and determine whether to generate SQL or natural response"""
-        # Keywords that suggest a SQL query is needed
-        sql_keywords = ['calculate', 'average', 'sum', 'count', 'show me', 'what is the', 'find', 'list', 'select']
-        
-        # Check if input seems to be asking for SQL query
-        needs_sql = any(keyword in user_input.lower() for keyword in sql_keywords)
-        
-        if needs_sql:
-            query = self.generate_sql(user_input)
-            if query.startswith('Error'):
-                return {'type': 'error', 'content': query}
+            response = self.client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=messages,
+                tools=self.tools,
+                tool_choice="auto",
+                temperature=0
+            )
+
+            message = response.choices[0].message
             
-            results = self.execute_query(query)
-            if isinstance(results, str):  # Error occurred
-                return {'type': 'error', 'content': results}
-            
-            return {
-                'type': 'sql',
-                'query': query,
-                'results': results
-            }
-        else:
-            response = self.generate_natural_response(user_input)
-            return {
-                'type': 'text',
-                'content': response
-            }
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                tool_call = message.tool_calls[0]
+                function_args = json.loads(tool_call.function.arguments)
+                
+                # Only one function to handle now
+                return self.generate_and_execute_sql(function_args['user_input'])
+            else:
+                return {
+                    'type': 'text',
+                    'content': message.content if message.content else "No response generated"
+                }
+                    
+        except Exception as e:
+            print(f"❌ Error in process_user_input: {str(e)}")
+            return {'type': 'error', 'content': str(e)}
 
 
 def main():
-    st.title("Interactive Data Chat Application")
+    st.title("Dana: The Interactive Data Assistant")
     
     app = DataChatApp()
     
@@ -400,13 +425,35 @@ def main():
     # Display chat messages from history
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-    
+            # Display content based on type
+            if message["display_type"] == "text":
+                st.markdown(message["content"])
+                
+            elif message["display_type"] == "sql":
+                # Display SQL query
+                st.markdown(message["content"])
+                # Display results dataframe
+                if message.get("data") is not None:
+                    st.dataframe(message["data"])
+                    
+            elif message["display_type"] == "error":
+                st.error(message["content"])
+                
+            elif message["display_type"] == "plot":
+                st.markdown(message["content"])
+                if message.get("data") is not None:
+                    st.plotly_chart(message["data"])
+
     # Chat input
     if prompt := st.chat_input("Ask me anything about your data..."):
-        # Display user message
+        # Add user message
         st.chat_message("user").markdown(prompt)
-        st.session_state.messages.append({"role": "user", "content": prompt})
+        st.session_state.messages.append({
+            "role": "user",
+            "content": prompt,
+            "display_type": "text",
+            "data": None
+        })
         
         # Process the input
         response = app.process_user_input(prompt)
@@ -414,24 +461,39 @@ def main():
         # Display assistant response
         with st.chat_message("assistant"):
             if response['type'] == 'sql':
-                st.markdown("I'll help you with that query!")
-                st.code(response['query'], language='sql')
-                st.markdown("Here are the results:")
+                content = f"""I'll help you with that query!
+```sql
+{response['query']}
+```
+Here are the results:"""
+                st.markdown(content)
                 st.dataframe(response['results'])
                 
-                # Generate visualization if applicable
-                fig = app.generate_visualization(response['results'])
-                if fig:
-                    st.plotly_chart(fig)
-                    
+                # Save message with both text and dataframe
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "display_type": "sql",
+                    "data": response['results']
+                })
+                
             elif response['type'] == 'text':
                 st.markdown(response['content'])
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": response['content'],
+                    "display_type": "text",
+                    "data": None
+                })
+                
             else:  # error
                 st.error(response['content'])
-        
-        # Save assistant response to chat history
-        content = response.get('content', response.get('query', 'Error processing request'))
-        st.session_state.messages.append({"role": "assistant", "content": content})
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": response['content'],
+                    "display_type": "error",
+                    "data": None
+                })
 
 
 if __name__ == "__main__":
