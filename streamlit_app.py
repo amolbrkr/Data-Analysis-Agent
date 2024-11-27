@@ -630,6 +630,14 @@ def main():
                 if response.get("data") is not None:
                     print("Plotting data inside with.")
                     st.plotly_chart(response["data"])
+                    st.session_state.messages.append(
+                        {
+                            "role": "assistant",
+                            "content": response["content"],
+                            "display_type": "plot",
+                            "data": response["data"],
+                        }
+                    )
 
             else:  # error
                 st.error(response["content"])
@@ -641,8 +649,6 @@ def main():
                         "data": None,
                     }
                 )
-
-            print("Messages: ", st.session_state.messages)
 
 
 if __name__ == "__main__":
