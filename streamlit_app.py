@@ -321,6 +321,7 @@ class DataChatAgent:
                     x=data.columns[0],
                     y=data.columns[1],
                     title=f"{data.columns[1]} vs {data.columns[0]}",
+                    trendline="ols"
                 )
 
             elif viz_type == "line":
