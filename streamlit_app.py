@@ -1,4 +1,6 @@
 import json
+import base64
+import os
 
 import duckdb
 import pandas as pd
@@ -70,6 +72,7 @@ class DataChatAgent:
                 },
             },
         ]
+        self.plot_count = 0
 
     def connect_to_database(self, connection_type, **kwargs):
         """Establishes database connection"""
@@ -321,7 +324,7 @@ class DataChatAgent:
                     x=data.columns[0],
                     y=data.columns[1],
                     title=f"{data.columns[1]} vs {data.columns[0]}",
-                    trendline="ols"
+                    trendline="ols",
                 )
 
             elif viz_type == "line":
@@ -386,10 +389,15 @@ class DataChatAgent:
             if plot is None:
                 return {"type": "error", "content": "Failed to create visualization"}
 
+            # Save plot image
+            image_base64 = self.save_plot_image(plot, f"plot_{self.plot_count}")
+            self.plot_count += 1
+
             return {
                 "type": "plot",
                 "content": f"Here's a {viz_details['viz_type']} visualization:",
                 "data": plot,
+                "image_base64": image_base64,
             }
 
         except Exception as e:
@@ -467,12 +475,27 @@ class DataChatAgent:
                 3. Providing information about the data structure when asked
                 
                 When appropriate use the custom functions provided to you. You do not have to call them every time, only when needed.""",
-                },
-                {
-                    "role": "user",
-                    "content": f"Current database state:\n{context}\n\nUser question: {user_input}",
-                },
+                }
             ]
+            content = [
+                {
+                    "type": "text",
+                    "text": f"Current database state:\n{context}\n\nUser question: {user_input}",
+                }
+            ]
+
+            for msg in st.session_state.messages[-5:]:  # Last 5 messages
+                if msg.get("display_type") == "plot" and msg.get("image_base64"):
+                    content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{msg['image_base64']}"
+                            },
+                        }
+                    )
+
+            messages.append({"role": "user", "content": content})
 
             response = self.client.chat.completions.create(
                 model="gpt-4o",
@@ -504,6 +527,22 @@ class DataChatAgent:
         except Exception as e:
             print(f"❌ Error in process_user_input: {str(e)}")
             return {"type": "error", "content": str(e)}
+
+    def save_plot_image(self, fig, plot_id):
+        """Save plotly figure as image and return base64 encoding"""
+
+        # Create images directory if it doesn't exist
+        os.makedirs("images", exist_ok=True)
+
+        # Save plot as PNG
+        image_path = f"images/plot_{plot_id}.png"
+        fig.write_image(image_path)
+
+        # Convert to base64
+        with open(image_path, "rb") as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode("utf-8")
+
+        return base64_image
 
 
 def main():
@@ -637,6 +676,7 @@ def main():
                             "content": response["content"],
                             "display_type": "plot",
                             "data": response["data"],
+                            "image_base64": response["image_base64"],
                         }
                     )
 
@@ -650,6 +690,8 @@ def main():
                         "data": None,
                     }
                 )
+
+        print(st.session_state.messages)
 
 
 if __name__ == "__main__":
