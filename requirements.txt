@@ -4,5 +4,5 @@ pandas==2.2.3
 SQLAlchemy==2.0.23
 streamlit==1.38.0
 statsmodels==0.14.0
-kaleido==0.2.1
+kaleido==0.1.0
 plotly==5.24.1
