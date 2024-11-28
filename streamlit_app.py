@@ -72,7 +72,6 @@ class DataChatAgent:
                 },
             },
         ]
-        self.plot_count = 0
 
     def connect_to_database(self, connection_type, **kwargs):
         """Establishes database connection"""
@@ -387,9 +386,7 @@ class DataChatAgent:
                 return {"type": "error", "content": "Failed to create visualization"}
 
             # Save plot image
-            image_base64 = self.save_plot_image(plot, f"plot_{self.plot_count}")
-            self.plot_count += 1
-            print("Plot count incremented: ", self.plot_count)
+            image_base64 = self._save_plot_image(plot)
 
             return {
                 "type": "plot",
@@ -544,21 +541,10 @@ class DataChatAgent:
             print(f"❌ Error in process_user_input: {str(e)}")
             return {"type": "error", "content": str(e)}
 
-    def save_plot_image(self, fig, plot_name):
+    def _save_plot_image(self, fig):
         """Save plotly figure as image and return base64 encoding"""
 
-        # Create images directory if it doesn't exist
-        os.makedirs("images", exist_ok=True)
-
-        # Save plot as PNG
-        image_path = f"images/{plot_name}.png"
-        fig.write_image(image_path)
-
-        # Convert to base64
-        with open(image_path, "rb") as image_file:
-            base64_image = base64.b64encode(image_file.read()).decode("utf-8")
-
-        return base64_image
+        return base64.b64encode(fig.to_image()).decode("ascii")
 
 
 def main():
@@ -618,10 +604,6 @@ def main():
                     f"**Shape:** {info['shape'][0]} rows, {info['shape'][1]} columns"
                 )
                 st.write("**Columns:**", ", ".join(info["columns"]))
-
-    # Add a debug button to print st.session_state.messages in the sidebar
-    if st.sidebar.button("Debug Messages"):
-        st.sidebar.write(st.session_state.messages)
 
     # Display chat messages from history
     for message in st.session_state.messages:
