@@ -203,11 +203,8 @@ class DataChatAgent:
 
             User Question: {user_input}
 
-            Write a SQL query to answer this question. The query should work with {'PostgreSQL' if st.session_state.database_type == 'postgres' else 'DuckDB'} syntax.
-            Return the ouput strictly as an SQL query without any backticks, quotes, or other formatting.
-            SQL Query:"""
-
-            print(f"🔄 Sending prompt to OpenAI:\n{prompt}")
+            The query should work with {'PostgreSQL' if st.session_state.database_type == 'postgres' else 'DuckDB'} syntax
+            Return the ouput strictly as an SQL query without any backticks, quotes, or other formatting."""
 
             # Get SQL query from OpenAI
             messages = [
@@ -392,6 +389,7 @@ class DataChatAgent:
             # Save plot image
             image_base64 = self.save_plot_image(plot, f"plot_{self.plot_count}")
             self.plot_count += 1
+            print("Plot count incremented: ", self.plot_count)
 
             return {
                 "type": "plot",
@@ -454,10 +452,11 @@ class DataChatAgent:
 
         return "\n".join(info_text)
 
-    def process_user_input(self, user_input):
+    def process_user_input(self):
         """Process user input using OpenAI function calling"""
+
         try:
-            print(f"🤔 Processing user input: {user_input}")
+            print(f"🤔 Processing user input")
 
             if not st.session_state.tables_info:
                 return {
@@ -466,40 +465,57 @@ class DataChatAgent:
                 }
 
             context = self.get_tables_info_text()
-            messages = [
+            conversation_history = [
                 {
                     "role": "system",
-                    "content": """You are a data analysis assistant. Your job is to help users analyze their data by:
-                1. Understanding their questions about the data
-                2. Using SQL queries to answer their questions
-                3. Providing information about the data structure when asked
-                
-                When appropriate use the custom functions provided to you. You do not have to call them every time, only when needed.""",
-                }
-            ]
-            content = [
+                    "content": """You are a data analysis assistant. Your job is to help users analyze their data by: \n1. Understanding their questions about the data \n2. Using SQL queries to answer their questions \n3. Providing analysis and insights based on the data \n\nWhen appropriate use the custom functions provided to you. You do not have to call them every time, only when needed.""",
+                },
                 {
-                    "type": "text",
-                    "text": f"Current database state:\n{context}\n\nUser question: {user_input}",
-                }
+                    "role": "user",
+                    "content": f"Current database state:\n{context}",
+                },
             ]
 
-            for msg in st.session_state.messages[-5:]:  # Last 5 messages
-                if msg.get("display_type") == "plot" and msg.get("image_base64"):
-                    content.append(
+            for message in st.session_state.messages[-5:]:
+                if message["display_type"] == "plot":
+                    conversation_history.append(
                         {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{msg['image_base64']}"
-                            },
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": message["content"]},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{message['image_base64']}"
+                                    },
+                                },
+                            ],
                         }
                     )
+                elif message["display_type"] == "sql":
+                    conversation_history.append(
+                        {
+                            "role": message["role"],
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": f"SQL Query: {message['content']} \n {message['data'].to_string()}",
+                                },
+                            ],
+                        }
+                    )
+                elif message["display_type"] == "error":  # Ignore errors
+                    pass
+                else:
+                    conversation_history.append(
+                        {"role": message["role"], "content": message["content"]}
+                    )
 
-            messages.append({"role": "user", "content": content})
+            print("Conversation history: ", conversation_history)
 
             response = self.client.chat.completions.create(
                 model="gpt-4o",
-                messages=messages,
+                messages=conversation_history,
                 tools=self.tools,
                 tool_choice="auto",
                 temperature=0,
@@ -528,14 +544,14 @@ class DataChatAgent:
             print(f"❌ Error in process_user_input: {str(e)}")
             return {"type": "error", "content": str(e)}
 
-    def save_plot_image(self, fig, plot_id):
+    def save_plot_image(self, fig, plot_name):
         """Save plotly figure as image and return base64 encoding"""
 
         # Create images directory if it doesn't exist
         os.makedirs("images", exist_ok=True)
 
         # Save plot as PNG
-        image_path = f"images/plot_{plot_id}.png"
+        image_path = f"images/{plot_name}.png"
         fig.write_image(image_path)
 
         # Convert to base64
@@ -603,6 +619,10 @@ def main():
                 )
                 st.write("**Columns:**", ", ".join(info["columns"]))
 
+    # Add a debug button to print st.session_state.messages in the sidebar
+    if st.sidebar.button("Debug Messages"):
+        st.sidebar.write(st.session_state.messages)
+
     # Display chat messages from history
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -635,7 +655,7 @@ def main():
         )
 
         # Process the input
-        response = app.process_user_input(prompt)
+        response = app.process_user_input()
 
         # Display assistant response
         with st.chat_message("assistant"):
@@ -668,7 +688,6 @@ def main():
             elif response["type"] == "plot":
                 st.markdown(response["content"])
                 if response.get("data") is not None:
-                    print("Plotting data inside with.")
                     st.plotly_chart(response["data"])
                     st.session_state.messages.append(
                         {
@@ -690,8 +709,6 @@ def main():
                         "data": None,
                     }
                 )
-
-        print(st.session_state.messages)
 
 
 if __name__ == "__main__":
