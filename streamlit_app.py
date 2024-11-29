@@ -1,6 +1,7 @@
 import json
 import base64
 import os
+import traceback
 
 import duckdb
 import pandas as pd
@@ -77,6 +78,10 @@ class DataChatAgent:
         if "memories" not in st.session_state:
             st.session_state.memories = {}
 
+        # Add response length preference to session state
+        if "response_length" not in st.session_state:
+            st.session_state.response_length = "Concise"  # default to concise
+
     def connect_to_database(self, connection_type, **kwargs):
         """Establishes database connection"""
         try:
@@ -97,7 +102,7 @@ class DataChatAgent:
             print("✅ Database connection successful")
             return True
         except Exception as e:
-            print(f"❌ Database connection failed: {str(e)}")
+            print(f"❌ Database connection failed: {str(e)}\n{traceback.format_exc()}")
             return False
 
     def load_file_to_database(self, uploaded_file):
@@ -130,7 +135,7 @@ class DataChatAgent:
             return True, file_name
 
         except Exception as e:
-            print(f"❌ File loading failed: {str(e)}")
+            print(f"❌ File loading failed: {str(e)}\n{traceback.format_exc()}")
             return False, str(e)
 
     def _get_sql_type(self, dtype):
@@ -299,7 +304,9 @@ class DataChatAgent:
         try:
             return json.loads(response.choices[0].message.content)
         except Exception as e:
-            print(f"❌ Error parsing visualization response: {str(e)}")
+            print(
+                f"❌ Error parsing visualization response: {str(e)}\n{traceback.format_exc()}"
+            )
             return None
 
     def create_visualization(self, viz_type, data):
@@ -353,7 +360,9 @@ class DataChatAgent:
 
             return None
         except Exception as e:
-            print(f"❌ Error creating visualization: {str(e)}")
+            print(
+                f"❌ Error creating visualization: {str(e)}\n{traceback.format_exc()}"
+            )
             return None
 
     def generate_visualization(self, user_input):
@@ -403,7 +412,9 @@ class DataChatAgent:
             }
 
         except Exception as e:
-            print(f"❌ Error in generate_visualization: {str(e)}")
+            print(
+                f"❌ Error in generate_visualization: {str(e)}\n{traceback.format_exc()}"
+            )
             return {"type": "error", "content": str(e)}
 
     def _update_schema_string(self):
@@ -433,7 +444,9 @@ class DataChatAgent:
             print(f"✅ Updated schema string:\n{st.session_state.table_schemas}")
 
         except Exception as e:
-            print(f"❌ Error updating schema string: {str(e)}")
+            print(
+                f"❌ Error updating schema string: {str(e)}\n{traceback.format_exc()}"
+            )
             st.session_state.table_schemas = ""
 
     def get_tables_info_text(self):
@@ -485,32 +498,35 @@ class DataChatAgent:
 
             return json.loads(response.choices[0].message.content)
         except Exception as e:
-            print(f"❌ Error in memory inference: {str(e)}")
+            print(f"❌ Error in memory inference: {str(e)}\n{traceback.format_exc()}")
             return {"action": "none"}
 
     def _handle_memory(self, user_input, context=""):
         """Process memory actions for user input"""
         memory_action = self._infer_memory_action(user_input, context)
-        
+
         if memory_action["action"] == "store":
             st.session_state.memories[memory_action["key"]] = {
                 "value": memory_action["value"],
                 "timestamp": pd.Timestamp.now().isoformat(),
             }
-            print(f"💾 Stored memory: {memory_action['key']} = {memory_action['value']}")
-            
+            print(
+                f"💾 Stored memory: {memory_action['key']} = {memory_action['value']}"
+            )
+
         elif memory_action["action"] == "retrieve":
             # Filter memories based on key similarity
             relevant_memories = {
-                k: v for k, v in st.session_state.memories.items() 
+                k: v
+                for k, v in st.session_state.memories.items()
                 if memory_action["key"].lower() in k.lower()
             }
             if relevant_memories:
-                memory_context = "\n".join([
-                    f"- {k}: {v['value']}" for k, v in relevant_memories.items()
-                ])
+                memory_context = "\n".join(
+                    [f"- {k}: {v['value']}" for k, v in relevant_memories.items()]
+                )
                 return f"{user_input}\n\nRelevant past findings:\n{memory_context}"
-        
+
         return user_input
 
     def process_user_input(self):
@@ -574,10 +590,14 @@ class DataChatAgent:
             print("Conversation history: ", conversation_history)
 
             # Add memory handling before processing
-            modified_input = self._handle_memory(conversation_history[-1]["content"], context)
-            
+            modified_input = self._handle_memory(
+                conversation_history[-1]["content"], context
+            )
+
             # Update conversation history with modified input
             conversation_history.append({"role": "user", "content": modified_input})
+
+            max_tokens = 350 if st.session_state.response_length == "Concise" else 1200
 
             response = self.client.chat.completions.create(
                 model="gpt-4o",
@@ -585,6 +605,7 @@ class DataChatAgent:
                 tools=self.tools,
                 tool_choice="auto",
                 temperature=0,
+                max_completion_tokens=max_tokens,
             )
 
             message = response.choices[0].message
@@ -607,7 +628,7 @@ class DataChatAgent:
                 }
 
         except Exception as e:
-            print(f"❌ Error in process_user_input: {str(e)}")
+            print(f"❌ Error in process_user_input: {str(e)}\n{traceback.format_exc()}")
             return {"type": "error", "content": str(e)}
 
     def _save_plot_image(self, fig):
@@ -624,7 +645,7 @@ def main():
     # Database Connection Section
     st.sidebar.header("🔌 Database Connection")
     connection_type = st.sidebar.radio(
-        "Select Connection Type", ["File Upload", "PostgreSQL"]
+        "Select Connection Type", ["File Upload", "PostgreSQL"], horizontal=True
     )
 
     if connection_type == "File Upload":
@@ -662,9 +683,17 @@ def main():
                 ):
                     st.sidebar.success("Connected to PostgreSQL!")
 
+    # Add response length selector in sidebar
+    st.session_state.response_length = st.sidebar.radio(
+        "Response Style",
+        options=["Concise", "Detailed"],
+        help="Choose between brief or detailed responses",
+        horizontal=True,
+    )
+
     # Display table information in sidebar
     if st.session_state.tables_info:
-        st.sidebar.header("💾 Available Tables")
+        st.sidebar.header("📋 Available Tables")
         for table_name, info in st.session_state.tables_info.items():
             with st.sidebar.expander(f"📊 {table_name}"):
                 st.write("**Preview:**")
@@ -680,11 +709,13 @@ def main():
         for key, memory in st.session_state.memories.items():
             with st.sidebar.expander(f"🔍 {key}"):
                 st.write(f"**Value:** {memory['value']}")
-                st.write(f"**Stored:** {pd.Timestamp(memory['timestamp']).strftime('%Y-%m-%d %H:%M')}")
+                st.write(
+                    f"**Stored:** {pd.Timestamp(memory['timestamp']).strftime('%Y-%m-%d %H:%M')}"
+                )
                 if st.button("🗑️ Delete", key=f"delete_{key}"):
                     del st.session_state.memories[key]
                     st.rerun()
-    
+
     # Add a debug button to print st.session_state.messages in the sidebar
     if st.sidebar.button("🐛 Debug Messages"):
         st.sidebar.write(st.session_state.messages)
