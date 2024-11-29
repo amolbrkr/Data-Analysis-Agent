@@ -622,7 +622,7 @@ def main():
     app = DataChatAgent()
 
     # Database Connection Section
-    st.sidebar.header("Database Connection")
+    st.sidebar.header("🔌 Database Connection")
     connection_type = st.sidebar.radio(
         "Select Connection Type", ["File Upload", "PostgreSQL"]
     )
@@ -662,6 +662,18 @@ def main():
                 ):
                     st.sidebar.success("Connected to PostgreSQL!")
 
+    # Display table information in sidebar
+    if st.session_state.tables_info:
+        st.sidebar.header("💾 Available Tables")
+        for table_name, info in st.session_state.tables_info.items():
+            with st.sidebar.expander(f"📊 {table_name}"):
+                st.write("**Preview:**")
+                st.dataframe(info["preview"])
+                st.write(
+                    f"**Shape:** {info['shape'][0]} rows, {info['shape'][1]} columns"
+                )
+                st.write("**Columns:**", ", ".join(info["columns"]))
+
     # Add memories display in sidebar
     if st.session_state.get("memories"):
         st.sidebar.header("📝 Stored Memories")
@@ -672,18 +684,10 @@ def main():
                 if st.button("🗑️ Delete", key=f"delete_{key}"):
                     del st.session_state.memories[key]
                     st.rerun()
-
-    # Display table information in sidebar
-    if st.session_state.tables_info:
-        st.sidebar.header("Available Tables")
-        for table_name, info in st.session_state.tables_info.items():
-            with st.sidebar.expander(f"📊 {table_name}"):
-                st.write("**Preview:**")
-                st.dataframe(info["preview"])
-                st.write(
-                    f"**Shape:** {info['shape'][0]} rows, {info['shape'][1]} columns"
-                )
-                st.write("**Columns:**", ", ".join(info["columns"]))
+    
+    # Add a debug button to print st.session_state.messages in the sidebar
+    if st.sidebar.button("🐛 Debug Messages"):
+        st.sidebar.write(st.session_state.messages)
 
     # Display chat messages from history
     for message in st.session_state.messages:
