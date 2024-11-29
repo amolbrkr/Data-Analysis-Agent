@@ -5,4 +5,5 @@ SQLAlchemy==2.0.23
 streamlit==1.38.0
 statsmodels==0.14.0
 plotly==5.24.1
-kaleido==0.1.0.post1
+kaleido==0.1.*
+# kaleido==0.1.0.post1
