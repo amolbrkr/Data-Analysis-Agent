@@ -382,6 +382,9 @@ class DataChatAgent:
 
             # Create visualization
             plot = self.create_visualization(viz_details["viz_type"], result)
+
+            print("Plot from create_visualization:", plot)
+
             if plot is None:
                 return {"type": "error", "content": "Failed to create visualization"}
 
