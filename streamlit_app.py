@@ -73,6 +73,10 @@ class DataChatAgent:
             },
         ]
 
+        # Add memory initialization
+        if "memories" not in st.session_state:
+            st.session_state.memories = {}
+
     def connect_to_database(self, connection_type, **kwargs):
         """Establishes database connection"""
         try:
@@ -452,9 +456,65 @@ class DataChatAgent:
 
         return "\n".join(info_text)
 
+    def _infer_memory_action(self, user_input, context=""):
+        """Determine if and how to handle memory for the given input"""
+        try:
+            prompt = f"""Analyze if this user input contains important information that should be stored for future reference.
+            
+            Context: {context}
+            User Input: {user_input}
+
+            If the input contains important findings, insights, or preferences that should be remembered, return a JSON with:
+            {{"action": "store", "key": "<descriptive_key>", "value": "<concise_summary>"}}
+
+            If we should retrieve related memories, return:
+            {{"action": "retrieve", "key": "<search_term>"}}
+
+            Otherwise return:
+            {{"action": "none"}}
+
+            Focus on storing analytical insights, key findings, and user preferences.
+            Keys should be descriptive and categorized (e.g., "sales_insight", "data_preference", "key_metric")."""
+
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+
+            return json.loads(response.choices[0].message.content)
+        except Exception as e:
+            print(f"❌ Error in memory inference: {str(e)}")
+            return {"action": "none"}
+
+    def _handle_memory(self, user_input, context=""):
+        """Process memory actions for user input"""
+        memory_action = self._infer_memory_action(user_input, context)
+        
+        if memory_action["action"] == "store":
+            st.session_state.memories[memory_action["key"]] = {
+                "value": memory_action["value"],
+                "timestamp": pd.Timestamp.now().isoformat(),
+            }
+            print(f"💾 Stored memory: {memory_action['key']} = {memory_action['value']}")
+            
+        elif memory_action["action"] == "retrieve":
+            # Filter memories based on key similarity
+            relevant_memories = {
+                k: v for k, v in st.session_state.memories.items() 
+                if memory_action["key"].lower() in k.lower()
+            }
+            if relevant_memories:
+                memory_context = "\n".join([
+                    f"- {k}: {v['value']}" for k, v in relevant_memories.items()
+                ])
+                return f"{user_input}\n\nRelevant past findings:\n{memory_context}"
+        
+        return user_input
+
     def process_user_input(self):
         """Process user input using OpenAI function calling"""
-
         try:
             print(f"🤔 Processing user input")
 
@@ -512,6 +572,12 @@ class DataChatAgent:
                     )
 
             print("Conversation history: ", conversation_history)
+
+            # Add memory handling before processing
+            modified_input = self._handle_memory(conversation_history[-1]["content"], context)
+            
+            # Update conversation history with modified input
+            conversation_history.append({"role": "user", "content": modified_input})
 
             response = self.client.chat.completions.create(
                 model="gpt-4o",
@@ -595,6 +661,17 @@ def main():
                     password=password,
                 ):
                     st.sidebar.success("Connected to PostgreSQL!")
+
+    # Add memories display in sidebar
+    if st.session_state.get("memories"):
+        st.sidebar.header("📝 Stored Memories")
+        for key, memory in st.session_state.memories.items():
+            with st.sidebar.expander(f"🔍 {key}"):
+                st.write(f"**Value:** {memory['value']}")
+                st.write(f"**Stored:** {pd.Timestamp(memory['timestamp']).strftime('%Y-%m-%d %H:%M')}")
+                if st.button("🗑️ Delete", key=f"delete_{key}"):
+                    del st.session_state.memories[key]
+                    st.rerun()
 
     # Display table information in sidebar
     if st.session_state.tables_info:
