@@ -9,6 +9,7 @@ import plotly.express as px
 import sqlalchemy
 import streamlit as st
 from openai import OpenAI
+import plotly.graph_objects as go
 
 
 class DataChatAgent:
@@ -72,6 +73,45 @@ class DataChatAgent:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "analyze_correlations",
+                    "description": "Analyze and visualize correlations between numeric columns",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "table_name": {
+                                "type": "string",
+                                "description": "The name of the table to analyze",
+                            }
+                        },
+                        "required": ["table_name"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "generate_summary_statistics",
+                    "description": "Generate summary statistics for specified columns",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "table_name": {
+                                "type": "string",
+                                "description": "The name of the table to analyze"
+                            },
+                            "columns": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "List of column names to analyze. If empty, analyzes all columns."
+                            }
+                        },
+                        "required": ["table_name"]
+                    }
+                }
+            }
         ]
 
         # Add memory initialization
@@ -619,6 +659,10 @@ class DataChatAgent:
                     return self.generate_and_execute_sql(function_args["user_input"])
                 elif function_name == "generate_visualization":
                     return self.generate_visualization(function_args["user_input"])
+                elif function_name == "analyze_correlations":
+                    return self.analyze_correlations(function_args["table_name"])
+                elif function_name == "generate_summary_statistics":
+                    return self.generate_summary_statistics(function_args["table_name"], function_args.get("columns", []))
             else:
                 return {
                     "type": "text",
@@ -636,6 +680,257 @@ class DataChatAgent:
 
         return base64.b64encode(fig.to_image()).decode("ascii")
 
+    def analyze_correlations(self, table_name):
+        """Analyze and visualize correlations between numeric columns"""
+        try:
+            print(f"📊 Analyzing correlations for table: {table_name}")
+
+            # Get all numeric columns
+            query = f'SELECT * FROM "{table_name}"'
+            df = st.session_state.database_connection.execute(query).fetch_df()
+            numeric_df = df.select_dtypes(include=["int64", "float64"])
+
+            if numeric_df.empty:
+                return {
+                    "type": "error",
+                    "content": f"No numeric columns found in table {table_name}",
+                }
+
+            # Calculate correlation matrix
+            corr_matrix = numeric_df.corr()
+
+            # Create heatmap using plotly
+            fig = px.imshow(
+                corr_matrix,
+                labels=dict(color="Correlation"),
+                color_continuous_scale="RdBu",
+                aspect="auto",
+            )
+
+            # Update layout for better readability
+            fig.update_layout(
+                title=f"Correlation Matrix for {table_name}",
+                xaxis_title="Features",
+                yaxis_title="Features",
+                width=800,
+                height=800,
+            )
+
+            # Save plot image
+            image_base64 = self._save_plot_image(fig)
+
+            # Create correlation summary text
+            strong_correlations = []
+            for i in range(len(corr_matrix.columns)):
+                for j in range(i + 1, len(corr_matrix.columns)):
+                    corr = corr_matrix.iloc[i, j]
+                    if abs(corr) > 0.5:  # Threshold for strong correlation
+                        col1, col2 = corr_matrix.columns[i], corr_matrix.columns[j]
+                        strong_correlations.append(f"{col1} vs {col2}: {corr:.2f}")
+
+            summary = (
+                "Strong correlations found:\n" + "\n".join(strong_correlations)
+                if strong_correlations
+                else "No strong correlations found."
+            )
+
+            return {
+                "type": "plot",
+                "content": f"Here's the correlation analysis for {table_name}:\n\n{summary}",
+                "data": fig,
+                "image_base64": image_base64,
+            }
+
+        except Exception as e:
+            print(
+                f"❌ Error in correlation analysis: {str(e)}\n{traceback.format_exc()}"
+            )
+            return {"type": "error", "content": str(e)}
+
+    def generate_summary_statistics(self, table_name, columns=None):
+        try:
+            print(f"📊 Generating summary statistics for table: {table_name}")
+            
+            # Fetch data
+            if columns and len(columns) > 0:
+                columns_str = ', '.join(f'"{col}"' for col in columns)
+                query = f'SELECT {columns_str} FROM "{table_name}"'
+            else:
+                query = f'SELECT * FROM "{table_name}"'
+            
+            df = st.session_state.database_connection.execute(query).fetch_df()
+            
+            summary_stats = {}
+            visualizations = []
+            
+            # Process each column
+            for col in df.columns:
+                col_stats = {}
+                
+                # Basic statistics for all columns
+                col_stats['count'] = len(df[col])
+                col_stats['null_count'] = df[col].isnull().sum()
+                col_stats['null_percentage'] = (col_stats['null_count'] / col_stats['count'] * 100)
+                col_stats['unique_values'] = df[col].nunique()
+                
+                # Type-specific statistics
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    stats = df[col].describe()
+                    col_stats.update({
+                        'mean': stats['mean'],
+                        'std': stats['std'],
+                        'min': stats['min'],
+                        'max': stats['max'],
+                        '25%': stats['25%'],
+                        '50%': stats['50%'],
+                        '75%': stats['75%']
+                    })
+                    
+                    # Create distribution plot
+                    fig = px.histogram(
+                        df, x=col,
+                        title=f'Distribution of {col}',
+                        marginal='box'  # Add box plot on the margin
+                    )
+                    visualizations.append((col, fig))
+                    
+                elif pd.api.types.is_string_dtype(df[col]):
+                    # For categorical columns
+                    value_counts = df[col].value_counts().head(10)
+                    col_stats['top_values'] = dict(value_counts)
+                    
+                    # Create bar plot of top categories
+                    fig = px.bar(
+                        x=value_counts.index,
+                        y=value_counts.values,
+                        title=f'Top 10 Categories in {col}'
+                    )
+                    visualizations.append((col, fig))
+                    
+                elif pd.api.types.is_datetime64_dtype(df[col]):
+                    # For datetime columns
+                    col_stats.update({
+                        'min_date': df[col].min(),
+                        'max_date': df[col].max(),
+                        'date_range_days': (df[col].max() - df[col].min()).days
+                    })
+                    
+                    # Create timeline distribution
+                    fig = px.histogram(
+                        df, x=col,
+                        title=f'Timeline Distribution of {col}'
+                    )
+                    visualizations.append((col, fig))
+                
+                summary_stats[col] = col_stats
+            
+            # Generate markdown summary
+            markdown_summary = "# Summary Statistics\n\n"
+            for col, stats in summary_stats.items():
+                markdown_summary += f"## {col}\n"
+                markdown_summary += f"- **Basic Info:**\n"
+                markdown_summary += f"  - Count: {stats['count']:,}\n"
+                markdown_summary += f"  - Null Values: {stats['null_count']:,} ({stats['null_percentage']:.2f}%)\n"
+                markdown_summary += f"  - Unique Values: {stats['unique_values']:,}\n"
+                
+                if 'mean' in stats:
+                    markdown_summary += f"- **Numerical Statistics:**\n"
+                    markdown_summary += f"  - Mean: {stats['mean']:.2f}\n"
+                    markdown_summary += f"  - Std Dev: {stats['std']:.2f}\n"
+                    markdown_summary += f"  - Min: {stats['min']:.2f}\n"
+                    markdown_summary += f"  - Max: {stats['max']:.2f}\n"
+                    markdown_summary += f"  - Quartiles: {stats['25%']:.2f} (25%), {stats['50%']:.2f} (50%), {stats['75%']:.2f} (75%)\n"
+                
+                if 'top_values' in stats:
+                    markdown_summary += f"- **Top Categories:**\n"
+                    for val, count in stats['top_values'].items():
+                        markdown_summary += f"  - {val}: {count:,}\n"
+                
+                if 'min_date' in stats:
+                    markdown_summary += f"- **Date Range:**\n"
+                    markdown_summary += f"  - From: {stats['min_date']}\n"
+                    markdown_summary += f"  - To: {stats['max_date']}\n"
+                    markdown_summary += f"  - Range: {stats['date_range_days']} days\n"
+                
+                markdown_summary += "\n"
+            
+            # Combine visualizations into a single figure using Figure Factory
+            if visualizations:
+                # Create subplot titles
+                subplot_titles = [v[0] for v in visualizations]
+                
+                # Create a list of figures for the subplots
+                figs = [v[1] for v in visualizations]
+                
+                # Calculate number of rows needed
+                n_rows = len(visualizations)
+                
+                # Create subplot figure using make_subplots
+                combined_fig = go.Figure()
+                
+                # Add each visualization as a subplot
+                for idx, (name, fig) in enumerate(visualizations):
+                    for trace in fig.data:
+                        trace.update(
+                            xaxis=f'x{idx+1}',
+                            yaxis=f'y{idx+1}'
+                        )
+                        combined_fig.add_trace(trace)
+                
+                # Update layout for each subplot
+                for i in range(n_rows):
+                    if i == 0:
+                        combined_fig.update_layout({
+                            f'yaxis': {'domain': [1 - (i+1)/n_rows, 1 - i/n_rows]},
+                            f'xaxis': {'anchor': f'y'}
+                        })
+                    else:
+                        combined_fig.update_layout({
+                            f'yaxis{i+1}': {'domain': [1 - (i+1)/n_rows, 1 - i/n_rows]},
+                            f'xaxis{i+1}': {'anchor': f'y{i+1}'}
+                        })
+                
+                # Update overall layout
+                combined_fig.update_layout(
+                    height=300 * n_rows,
+                    width=800,
+                    showlegend=False,
+                    title_text="Distribution Plots",
+                    margin=dict(t=50, b=50)
+                )
+                
+                # Add subplot titles
+                for i, title in enumerate(subplot_titles):
+                    combined_fig.add_annotation(
+                        text=title,
+                        xref="paper",
+                        yref="paper",
+                        x=0,
+                        y=1 - i/n_rows,
+                        yanchor="bottom",
+                        xanchor="left",
+                        showarrow=False,
+                        font=dict(size=14)
+                    )
+                
+                # Save plot image
+                image_base64 = self._save_plot_image(combined_fig)
+                
+                return {
+                    "type": "plot",
+                    "content": markdown_summary,
+                    "data": combined_fig,
+                    "image_base64": image_base64
+                }
+            else:
+                return {
+                    "type": "text",
+                    "content": markdown_summary
+                }
+                
+        except Exception as e:
+            print(f"❌ Error in summary statistics: {str(e)}\n{traceback.format_exc()}")
+            return {"type": "error", "content": str(e)}
 
 def main():
     st.title("Dana: The Interactive Data Assistant")
